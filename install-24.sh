@@ -22,13 +22,13 @@ echo ""
 prepare_env() {
     echo -e "${YELLOW}[1/4] Проверка и подготовка окружения...${NC}"
     
-    # Синхронизация системного времени (критично для проверки TLS-сертификатов)
+    # Синхронизация системного времени
     if [ -x /usr/sbin/ntpd ]; then
         echo -e "      Синхронизация системного времени..."
         ntpd -q -p time.google.com >/dev/null 2>&1 || true
     fi
 
-    # Проверяем и устанавливаем необходимые пакеты
+    # Проверка зависимостей
     NEED_UPDATE=0
     for pkg in curl tar xz ca-bundle ca-certificates; do
         if ! opkg list-installed | grep -q "^$pkg "; then
@@ -53,21 +53,22 @@ download_latest_naive() {
     cd /tmp
     rm -rf /tmp/naiveproxy-* /tmp/naiveproxy-latest.tar.xz
 
-    # Получение прямой ссылки на релиз с использованием User-Agent
-    URL=$(curl -sSL -H "User-Agent: Mozilla/5.0" https://api.github.com/repos/klzgrad/naiveproxy/releases/latest | grep "browser_download_url" | grep "openwrt-aarch64" | head -n 1 | cut -d '"' -f 4)
+    # Точный фильтр ссылки на .tar.xz
+    URL=$(curl -sSL -H "User-Agent: Mozilla/5.0" https://api.github.com/repos/klzgrad/naiveproxy/releases/latest | grep "browser_download_url" | grep "openwrt-aarch64" | grep "\.tar\.xz" | head -n 1 | cut -d '"' -f 4)
 
     if [ -z "$URL" ]; then
-        echo -e "      ${RED}ОШИБКА: Не удалось получить ссылку на релиз с GitHub API!${NC}"
-        echo -e "      Проверьте интернет-соединение или точное время на роутере (команда 'date')."
+        echo -e "      ${RED}ОШИБКА: Не удалось получить прямую ссылку на архив c GitHub!${NC}"
+        echo -e "      Проверьте доступность интернета или точное время на роутере (команда 'date')."
         exit 1
     fi
 
-    echo -e "      Ссылка получена, скачивание архива через curl..."
+    echo -e "      Прямая ссылка получена: ${CYAN}$(basename "$URL")${NC}"
+    echo -e "      Скачивание архива..."
     curl -sSL -H "User-Agent: Mozilla/5.0" -o naiveproxy-latest.tar.xz "$URL"
 
-    # Проверяем, что архив валиден и не поврежден
+    # Валидация xz архива перед распаковкой
     if ! xz -t naiveproxy-latest.tar.xz >/dev/null 2>&1; then
-        echo -e "      ${RED}ОШИБКА: Скачанный файл повреждён или не является xz-архивом!${NC}"
+        echo -e "      ${RED}ОШИБКА: Скачанный файл не является архивом .tar.xz!${NC}"
         rm -f naiveproxy-latest.tar.xz
         exit 1
     fi
@@ -75,7 +76,6 @@ download_latest_naive() {
     echo -e "      Распаковка и замена бинарника..."
     tar -xf naiveproxy-latest.tar.xz
     
-    # Динамический поиск бинарника
     NAIVE_BIN=$(find /tmp -type f -name "naive" | head -n 1)
 
     if [ -f "$NAIVE_BIN" ]; then
@@ -84,7 +84,7 @@ download_latest_naive() {
         rm -rf /tmp/naiveproxy-* /tmp/naiveproxy-latest.tar.xz
         echo -e "      ${GREEN}Исполняемый файл /usr/bin/naive успешно обновлен!${NC}"
     else
-        echo -e "      ${RED}ОШИБКА: Исполняемый файл 'naive' не найден внутри архива!${NC}"
+        echo -e "      ${RED}ОШИБКА: Бинарник 'naive' не найден внутри архива!${NC}"
         rm -rf /tmp/naiveproxy-* /tmp/naiveproxy-latest.tar.xz
         exit 1
     fi
