@@ -1,103 +1,156 @@
 #!/bin/sh
-# NaïveProxy Installer/Updater for OpenWrt (aarch64)
-# Source: https://github.com/ваш-репозиторий/naive-setup
 
-set -e
+# ==============================================================================
+# NaïveProxy Installer & Updater for OpenWrt (aarch64)
+# ==============================================================================
 
-# Проверка прав root
-if [ "$(id -u)" != "0" ]; then
-    echo "Ошибка: скрипт должен запускаться с правами root." >&2
-    exit 1
-fi
+# Цветной вывод
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
 
-# Функция получения URL последнего релиза для aarch64
-get_latest_url() {
-    wget -qO- https://api.github.com/repos/klzgrad/naiveproxy/releases/latest \
-        | grep "browser_download_url" \
-        | grep "openwrt-aarch64" \
-        | cut -d '"' -f 4
-}
+clear
+echo -e "${CYAN}========================================================${NC}"
+echo -e "${CYAN}   NaïveProxy Installer & Updater for OpenWrt (aarch64) ${NC}"
+echo -e "${CYAN}========================================================${NC}"
+echo ""
 
-# Установка зависимостей
-install_deps() {
-    echo "Обновление списка пакетов..."
-    opkg update
-    echo "Установка необходимых утилит..."
-    opkg install nano curl tar xz wget-ssl ca-bundle ca-certificates
-}
-
-# Скачивание и установка бинарника
-download_and_install_binary() {
-    cd /tmp
-    echo "Получение ссылки на последнюю версию..."
-    URL=$(get_latest_url)
-    if [ -z "$URL" ]; then
-        echo "Ошибка: не удалось получить URL для скачивания. Проверьте интернет." >&2
-        exit 1
+# ------------------------------------------------------------------------------
+# Шаг 1. Подготовка системы и проверка зависимостей
+# ------------------------------------------------------------------------------
+prepare_env() {
+    echo -e "${YELLOW}[1/4] Проверка и подготовка окружения...${NC}"
+    
+    # Синхронизация системного времени (критично для TLS-сертификатов GitHub)
+    if [ -x /usr/sbin/ntpd ]; then
+        echo -e "      Синхронизация системного времени..."
+        ntpd -q -p time.google.com >/dev/null 2>&1 || true
     fi
-    echo "Скачивание $URL ..."
-    wget -O naiveproxy-latest.tar.xz "$URL"
-    if [ ! -s naiveproxy-latest.tar.xz ]; then
-        echo "Ошибка: файл пуст или не скачан." >&2
-        exit 1
-    fi
-    echo "Распаковка..."
-    tar -xf naiveproxy-latest.tar.xz
-    BIN_DIR=$(find . -maxdepth 1 -type d -name "naiveproxy-*" | head -1)
-    if [ -z "$BIN_DIR" ]; then
-        echo "Ошибка: не найдена директория после распаковки." >&2
-        exit 1
-    fi
-    mv "$BIN_DIR/naive" /usr/bin/naive
-    chmod +x /usr/bin/naive
-    cd /
-    rm -rf /tmp/naiveproxy-* /tmp/naiveproxy-latest.tar.xz
-    echo "Бинарник установлен в /usr/bin/naive"
-}
 
-# Создание конфигурационного файла
-create_config() {
-    mkdir -p /etc/naiveproxy
-    echo "Введите логин (username):"
-    read username
-    echo "Введите пароль (без спецсимволов, влияющих на URL):"
-    read password
-    echo "Введите адрес сервера (домен или IP):"
-    read server
-    echo "Введите порт (по умолчанию 443):"
-    read port
-    [ -z "$port" ] && port=443
-
-    echo "Параметр concurrency (количество одновременных соединений)."
-    echo "Моё мнение: значение >1 может снижать маскировку, т.к. создаёт больше параллельных потоков,"
-    echo "что нехарактерно для обычного браузера. Рекомендую не указывать (использовать значение по умолчанию 1)"
-    echo "или явно задать 1."
-    echo "Хотите добавить параметр concurrency? (y/n)"
-    read use_concurrency
-    conc=""
-    if [ "$use_concurrency" = "y" ] || [ "$use_concurrency" = "Y" ]; then
-        echo "Введите значение (например, 1, 2, 4):"
-        read conc_val
-        if [ -n "$conc_val" ]; then
-            conc=",\n  \"concurrency\": $conc_val"
+    # Проверка и установка пакетов
+    NEED_UPDATE=0
+    for pkg in curl tar xz ca-bundle ca-certificates; do
+        if ! opkg list-installed | grep -q "^$pkg "; then
+            NEED_UPDATE=1
+            break
         fi
+    done
+
+    if [ "$NEED_UPDATE" -eq 1 ]; then
+        echo -e "      Установка необходимых системных утилит (curl, tar, ca-certificates)..."
+        rm -f /var/opkg-lists/* >/dev/null 2>&1
+        opkg update >/dev/null 2>&1
+        opkg install curl tar xz ca-bundle ca-certificates >/dev/null 2>&1
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# Шаг 2. Загрузка последнего релиза с GitHub
+# ------------------------------------------------------------------------------
+download_latest_naive() {
+    echo -e "${YELLOW}[2/4] Загрузка актуального релиза NaïveProxy с GitHub...${NC}"
+    
+    # Получение URL через GitHub API с помощью curl (защита от багов wget/SSL)
+    RELEASE_URL=$(curl -s https://api.github.com/repos/klzgrad/naiveproxy/releases/latest | grep "browser_download_url" | grep "openwrt-aarch64" | cut -d '"' -f 4)
+
+    if [ -z "$RELEASE_URL" ]; then
+        echo -e "      ${RED}ОШИБКА: Не удалось получить ссылку на релиз с GitHub!${NC}"
+        echo -e "      Проверьте доступность интернета или системное время (команда 'date')."
+        exit 1
     fi
 
-    cat > /etc/naiveproxy/config.json <<EOF
+    cd /tmp
+    echo -e "      Скачивание архива..."
+    curl -L -s -o naiveproxy-latest.tar.xz "$RELEASE_URL"
+
+    if [ ! -f naiveproxy-latest.tar.xz ]; then
+        echo -e "      ${RED}ОШИБКА: Файл архива не скачался!${NC}"
+        exit 1
+    fi
+
+    echo -e "      Распаковка и замена бинарника..."
+    tar -xf naiveproxy-latest.tar.xz
+    
+    if [ -f naiveproxy-*/naive ]; then
+        mv naiveproxy-*/naive /usr/bin/naive
+        chmod +x /usr/bin/naive
+        rm -rf naiveproxy-* naiveproxy-latest.tar.xz
+        echo -e "      ${GREEN}Исполняемый файл /usr/bin/naive успешно обновлен!${NC}"
+    else
+        echo -e "      ${RED}ОШИБКА: Исполняемый файл 'naive' не найден внутри архива!${NC}"
+        rm -rf naiveproxy-* naiveproxy-latest.tar.xz
+        exit 1
+    fi
+}
+
+# ------------------------------------------------------------------------------
+# Шаг 3. Создание/настройка конфигурации и службы procd
+# ------------------------------------------------------------------------------
+setup_config_and_service() {
+    echo -e "${YELLOW}[3/4] Настройка конфигурации и службы автозапуска...${NC}"
+    mkdir -p /etc/naiveproxy
+
+    # Запрос данных у пользователя
+    echo ""
+    echo -e "${CYAN}--- Введите данные вашего сервера NaïveProxy ---${NC}"
+    
+    read -p "Адрес сервера (домен или IP) [например: srv-repo.jo3.org]: " NAV_HOST
+    while [ -z "$NAV_HOST" ]; do
+        echo -e "${RED}Адрес сервера не может быть пустым!${NC}"
+        read -p "Адрес сервера: " NAV_HOST
+    done
+
+    read -p "Порт сервера [по умолчанию: 443]: " NAV_PORT
+    NAV_PORT=${NAV_PORT:-443}
+
+    read -p "Логин (Username): " NAV_USER
+    while [ -z "$NAV_USER" ]; do
+        echo -e "${RED}Логин не может быть пустым!${NC}"
+        read -p "Логин (Username): " NAV_USER
+    done
+
+    read -p "Пароль (Password): " NAV_PASS
+    while [ -z "$NAV_PASS" ]; do
+        echo -e "${RED}Пароль не может быть пустым!${NC}"
+        read -p "Пароль (Password): " NAV_PASS
+    done
+
+    read -p "Локальный SOCKS5 порт роутера [по умолчанию: 10800]: " LOCAL_PORT
+    LOCAL_PORT=${LOCAL_PORT:-10800}
+
+    echo ""
+    echo -e "${YELLOW}Опция Concurrency (Количество параллельных туннелей):${NC}"
+    echo "1 — Стандартный режим (Рекомендуется! Максимальная маскировка под Chrome)."
+    echo "4 — Мульти-туннелирование (Выше скорость при потерях пакетов, но выше риск детекта DPI)."
+    read -p "Включить мульти-туннелирование concurrency=4? (y/N) [по умолчанию: N]: " USE_CONC
+
+    case "$USE_CONC" in
+        [yY][eE][sS]|[yY])
+            CONCURRENCY_VAL=4
+            echo -e "      Установлено значение: ${YELLOW}concurrency = 4${NC}"
+            ;;
+        *)
+            CONCURRENCY_VAL=1
+            echo -e "      Установлено значение: ${GREEN}concurrency = 1 (Безопасный режим)${NC}"
+            ;;
+    esac
+
+    # Формирование JSON-файла
+    cat << EOF > /etc/naiveproxy/config.json
 {
-  "listen": "socks://127.0.0.1:10800",
-  "proxy": "https://$username:$password@$server:$port",
-  "log": ""$conc
+  "listen": "socks://127.0.0.1:${LOCAL_PORT}",
+  "proxy": "https://${NAV_USER}:${NAV_PASS}@${NAV_HOST}:${NAV_PORT}",
+  "log": "",
+  "concurrency": ${CONCURRENCY_VAL}
 }
 EOF
-    echo "Конфиг создан: /etc/naiveproxy/config.json"
-}
+    echo -e "      Файл /etc/naiveproxy/config.json успешно создан."
 
-# Создание init-скрипта
-create_init_script() {
-    cat > /etc/init.d/naiveproxy <<'EOF'
+    # Создание init-скрипта procd
+    cat << 'EOF' > /etc/init.d/naiveproxy
 #!/bin/sh /etc/rc.common
-
 START=99
 USE_PROCD=1
 
@@ -111,71 +164,71 @@ start_service() {
 }
 EOF
     chmod +x /etc/init.d/naiveproxy
-    /etc/init.d/naiveproxy enable
-    echo "Init-скрипт создан, добавлен в автозагрузку."
+    /etc/init.d/naiveproxy enable >/dev/null 2>&1
+    echo -e "      Служба /etc/init.d/naiveproxy добавлена в автозапуск."
 }
 
-# Запуск и проверка
-start_and_check() {
-    echo "Запуск службы..."
-    /etc/init.d/naiveproxy start
+# ------------------------------------------------------------------------------
+# Шаг 4. Диагностика и проверка статуса
+# ------------------------------------------------------------------------------
+check_status() {
+    echo -e "${YELLOW}[4/4] Запуск и проверка статуса службы...${NC}"
+    /etc/init.d/naiveproxy restart >/dev/null 2>&1
     sleep 2
 
-    # Проверка через ss или netstat
-    if command -v ss >/dev/null 2>&1; then
-        echo "Проверка порта через ss:"
-        ss -tulpn | grep naive || echo "Процесс не найден в ss."
-    elif command -v netstat >/dev/null 2>&1; then
-        echo "Проверка порта через netstat:"
-        netstat -tulpn | grep naive || echo "Процесс не найден в netstat."
+    echo ""
+    echo -e "${CYAN}================ РЕЗУЛЬТАТЫ ПРОВЕРКИ ================${NC}"
+
+    # 1. Проверка процесса
+    PID=$(pgrep -f "/usr/bin/naive")
+    if [ -n "$PID" ]; then
+        VER=$(/usr/bin/naive --version 2>&1)
+        echo -e "1. Процесс NaïveProxy:  ${GREEN}РАБОТАЕТ${NC} (PID: $PID)"
+        echo -e "   Установленная версия: ${GREEN}$VER${NC}"
     else
-        echo "Утилиты ss/netstat не найдены, пропускаем проверку порта."
+        echo -e "1. Процесс NaïveProxy:  ${RED}НЕ НАЙДЕН / ОШИБКА ЗАПУСКА${NC}"
+        echo -e "   Проверьте правильность конфига в /etc/naiveproxy/config.json"
+        exit 1
     fi
 
-    if pgrep -f "naive /etc/naiveproxy/config.json" >/dev/null; then
-        echo "✅ NaïveProxy успешно запущен."
+    # 2. Проверка порта
+    LISTEN_PORT=$(grep '"listen"' /etc/naiveproxy/config.json 2>/dev/null | awk -F':' '{print $3}' | tr -d '", ')
+    LISTEN_PORT=${LISTEN_PORT:-10800}
+
+    PORT_CHECK=$(netstat -tulpn 2>/dev/null | grep "$LISTEN_PORT" || ss -tulpn 2>/dev/null | grep "$LISTEN_PORT")
+    if [ -n "$PORT_CHECK" ]; then
+        echo -e "2. Локальный SOCKS5 порт ${LISTEN_PORT}: ${GREEN}ПОДНЯТ И СЛУШАЕТ ВХОДЯЩИЕ ПОДКЛЮЧЕНИЯ${NC}"
     else
-        echo "❌ Процесс NaïveProxy не обнаружен. Проверьте логи." >&2
+        echo -e "2. Локальный SOCKS5 порт ${LISTEN_PORT}: ${RED}НЕ ПРОСЛУШИВАЕТСЯ${NC}"
     fi
+    echo -e "${CYAN}========================================================${NC}"
 }
 
-# ===== Основной блок =====
-echo "=== Установка / Обновление NaïveProxy для OpenWrt (aarch64) ==="
-echo "Что вы хотите сделать? (install / update)"
-read action
+# ------------------------------------------------------------------------------
+# Главное меню выбора действия
+# ------------------------------------------------------------------------------
+echo "Выберите действие:"
+echo "1) Чистая установка (Загрузка бинарника + ввод данных + создание конфигов)"
+echo "2) Обновление бинарника (Сохраняет текущий конфиг и обновляет только NaïveProxy)"
+echo ""
+read -p "Введите номер (1 или 2) [по умолчанию: 1]: " ACTION
+ACTION=${ACTION:-1}
 
-case "$action" in
-    install|Install|INSTALL|i|I)
-        echo "Запуск установки..."
-        if [ -f /usr/bin/naive ] || [ -f /etc/init.d/naiveproxy ]; then
-            echo "Обнаружена существующая установка. Переустановить? (y/n)"
-            read proceed
-            [ "$proceed" != "y" ] && [ "$proceed" != "Y" ] && exit 0
-            # Останавливаем службу, если она есть
-            /etc/init.d/naiveproxy stop 2>/dev/null || true
-        fi
-        install_deps
-        download_and_install_binary
-        create_config
-        create_init_script
-        start_and_check
-        echo "✅ Установка завершена."
-        ;;
-    update|Update|UPDATE|u|U)
-        echo "Запуск обновления..."
-        if [ ! -f /usr/bin/naive ]; then
-            echo "❌ NaïveProxy не установлен. Сначала выполните установку." >&2
-            exit 1
-        fi
-        # Останавливаем службу
-        /etc/init.d/naiveproxy stop 2>/dev/null || true
-        download_and_install_binary
-        /etc/init.d/naiveproxy start
-        start_and_check
-        echo "✅ Обновление завершено."
+case "$ACTION" in
+    2)
+        echo -e "${GREEN}--- Выбран режим ОБНОВЛЕНИЯ ---${NC}"
+        prepare_env
+        download_latest_naive
+        check_status
         ;;
     *)
-        echo "❌ Неизвестное действие. Используйте install или update." >&2
-        exit 1
+        echo -e "${GREEN}--- Выбран режим ЧИСТОЙ УСТАНОВКИ ---${NC}"
+        prepare_env
+        download_latest_naive
+        setup_config_and_service
+        check_status
         ;;
 esac
+
+echo ""
+echo -e "${GREEN}Настройка успешно завершена!${NC}"
