@@ -51,35 +51,30 @@ prepare_env() {
 # ------------------------------------------------------------------------------
 download_latest_naive() {
     echo -e "${YELLOW}[2/4] Загрузка актуального релиза NaïveProxy с GitHub...${NC}"
-    
-    # Получение URL через GitHub API с помощью curl (защита от багов wget/SSL)
-    RELEASE_URL=$(curl -s https://api.github.com/repos/klzgrad/naiveproxy/releases/latest | grep "browser_download_url" | grep "openwrt-aarch64" | cut -d '"' -f 4)
-
-    if [ -z "$RELEASE_URL" ]; then
-        echo -e "      ${RED}ОШИБКА: Не удалось получить ссылку на релиз с GitHub!${NC}"
-        echo -e "      Проверьте доступность интернета или системное время (команда 'date')."
-        exit 1
-    fi
-
     cd /tmp
-    echo -e "      Скачивание архива..."
-    curl -L -s -o naiveproxy-latest.tar.xz "$RELEASE_URL"
 
-    if [ ! -f naiveproxy-latest.tar.xz ]; then
-        echo -e "      ${RED}ОШИБКА: Файл архива не скачался!${NC}"
+    # Твоя оригинальная команда + User-Agent (чтобы GitHub не отдавал 403)
+    URL=$(wget -qO- --user-agent="Mozilla/5.0" https://api.github.com/repos/klzgrad/naiveproxy/releases/latest | grep "browser_download_url" | grep "openwrt-aarch64" | cut -d '"' -f 4)
+
+    # Проверка: если URL пустой, выходим без попытки распаковать мусор
+    if [ -z "$URL" ]; then
+        echo -e "      ${RED}ОШИБКА: GitHub API не вернул ссылку! Проверьте время на роутере (команда date).${NC}"
         exit 1
     fi
 
-    echo -e "      Распаковка и замена бинарника..."
+    echo -e "      Скачивание..."
+    wget -q -O naiveproxy-latest.tar.xz "$URL"
+
+    echo -e "      Распаковка..."
     tar -xf naiveproxy-latest.tar.xz
     
     if [ -f naiveproxy-*/naive ]; then
         mv naiveproxy-*/naive /usr/bin/naive
         chmod +x /usr/bin/naive
         rm -rf naiveproxy-* naiveproxy-latest.tar.xz
-        echo -e "      ${GREEN}Исполняемый файл /usr/bin/naive успешно обновлен!${NC}"
+        echo -e "      ${GREEN}Бинарник /usr/bin/naive успешно обновлен!${NC}"
     else
-        echo -e "      ${RED}ОШИБКА: Исполняемый файл 'naive' не найден внутри архива!${NC}"
+        echo -e "      ${RED}ОШИБКА: Файл 'naive' не найден!${NC}"
         rm -rf naiveproxy-* naiveproxy-latest.tar.xz
         exit 1
     fi
