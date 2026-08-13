@@ -4,12 +4,11 @@
 # NaïveProxy Installer & Updater for OpenWrt (aarch64)
 # ==============================================================================
 
-# Цветной вывод
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
 clear
 echo -e "${CYAN}========================================================${NC}"
@@ -23,15 +22,15 @@ echo ""
 prepare_env() {
     echo -e "${YELLOW}[1/4] Проверка и подготовка окружения...${NC}"
     
-    # Синхронизация системного времени (критично для TLS-сертификатов GitHub)
+    # Синхронизация системного времени
     if [ -x /usr/sbin/ntpd ]; then
         echo -e "      Синхронизация системного времени..."
         ntpd -q -p time.google.com >/dev/null 2>&1 || true
     fi
 
-    # Проверка и установка пакетов
+    # Установка базовых утилит, если их нет
     NEED_UPDATE=0
-    for pkg in curl tar xz ca-bundle ca-certificates; do
+    for pkg in tar xz wget-ssl ca-bundle ca-certificates; do
         if ! opkg list-installed | grep -q "^$pkg "; then
             NEED_UPDATE=1
             break
@@ -39,10 +38,10 @@ prepare_env() {
     done
 
     if [ "$NEED_UPDATE" -eq 1 ]; then
-        echo -e "      Установка необходимых системных утилит (curl, tar, ca-certificates)..."
+        echo -e "      Установка системных утилит (wget-ssl, tar, xz, ca-certificates)..."
         rm -f /var/opkg-lists/* >/dev/null 2>&1
         opkg update >/dev/null 2>&1
-        opkg install curl tar xz ca-bundle ca-certificates >/dev/null 2>&1
+        opkg install tar xz wget-ssl ca-bundle ca-certificates >/dev/null 2>&1
     fi
 }
 
@@ -52,29 +51,36 @@ prepare_env() {
 download_latest_naive() {
     echo -e "${YELLOW}[2/4] Загрузка актуального релиза NaïveProxy с GitHub...${NC}"
     cd /tmp
+    rm -rf naiveproxy-* naiveproxy-latest.tar.xz
 
-    # Твоя оригинальная команда + User-Agent (чтобы GitHub не отдавал 403)
+    # Парсинг ссылки на актуальный релиз
     URL=$(wget -qO- --user-agent="Mozilla/5.0" https://api.github.com/repos/klzgrad/naiveproxy/releases/latest | grep "browser_download_url" | grep "openwrt-aarch64" | cut -d '"' -f 4)
 
-    # Проверка: если URL пустой, выходим без попытки распаковать мусор
     if [ -z "$URL" ]; then
-        echo -e "      ${RED}ОШИБКА: GitHub API не вернул ссылку! Проверьте время на роутере (команда date).${NC}"
+        echo -e "      ${RED}ОШИБКА: Не удалось получить ссылку на релиз с GitHub!${NC}"
+        echo -e "      Проверьте интернет-соединение или время на роутере (команда 'date')."
         exit 1
     fi
 
-    echo -e "      Скачивание..."
-    wget -q -O naiveproxy-latest.tar.xz "$URL"
+    echo -e "      Ссылка получена, скачивание архива..."
+    wget -q --user-agent="Mozilla/5.0" --no-check-certificate -O naiveproxy-latest.tar.xz "$URL"
 
-    echo -e "      Распаковка..."
+    if [ ! -s naiveproxy-latest.tar.xz ]; then
+        echo -e "      ${RED}ОШИБКА: Файл архива не скачался или пуст!${NC}"
+        rm -f naiveproxy-latest.tar.xz
+        exit 1
+    fi
+
+    echo -e "      Распаковка и замена бинарника..."
     tar -xf naiveproxy-latest.tar.xz
     
     if [ -f naiveproxy-*/naive ]; then
         mv naiveproxy-*/naive /usr/bin/naive
         chmod +x /usr/bin/naive
         rm -rf naiveproxy-* naiveproxy-latest.tar.xz
-        echo -e "      ${GREEN}Бинарник /usr/bin/naive успешно обновлен!${NC}"
+        echo -e "      ${GREEN}Исполняемый файл /usr/bin/naive успешно обновлен!${NC}"
     else
-        echo -e "      ${RED}ОШИБКА: Файл 'naive' не найден!${NC}"
+        echo -e "      ${RED}ОШИБКА: Исполняемый файл 'naive' не найден внутри архива!${NC}"
         rm -rf naiveproxy-* naiveproxy-latest.tar.xz
         exit 1
     fi
@@ -87,7 +93,6 @@ setup_config_and_service() {
     echo -e "${YELLOW}[3/4] Настройка конфигурации и службы автозапуска...${NC}"
     mkdir -p /etc/naiveproxy
 
-    # Запрос данных у пользователя
     echo ""
     echo -e "${CYAN}--- Введите данные вашего сервера NaïveProxy ---${NC}"
     
@@ -132,7 +137,6 @@ setup_config_and_service() {
             ;;
     esac
 
-    # Формирование JSON-файла
     cat << EOF > /etc/naiveproxy/config.json
 {
   "listen": "socks://127.0.0.1:${LOCAL_PORT}",
@@ -143,7 +147,6 @@ setup_config_and_service() {
 EOF
     echo -e "      Файл /etc/naiveproxy/config.json успешно создан."
 
-    # Создание init-скрипта procd
     cat << 'EOF' > /etc/init.d/naiveproxy
 #!/bin/sh /etc/rc.common
 START=99
@@ -174,7 +177,6 @@ check_status() {
     echo ""
     echo -e "${CYAN}================ РЕЗУЛЬТАТЫ ПРОВЕРКИ ================${NC}"
 
-    # 1. Проверка процесса
     PID=$(pgrep -f "/usr/bin/naive")
     if [ -n "$PID" ]; then
         VER=$(/usr/bin/naive --version 2>&1)
@@ -186,7 +188,6 @@ check_status() {
         exit 1
     fi
 
-    # 2. Проверка порта
     LISTEN_PORT=$(grep '"listen"' /etc/naiveproxy/config.json 2>/dev/null | awk -F':' '{print $3}' | tr -d '", ')
     LISTEN_PORT=${LISTEN_PORT:-10800}
 
@@ -226,4 +227,4 @@ case "$ACTION" in
 esac
 
 echo ""
-echo -e "${GREEN}Настройка успешно завершена!${NC}"
+echo -e "${GREEN}Завершено!${NC}"
