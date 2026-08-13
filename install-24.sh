@@ -53,31 +53,42 @@ download_latest_naive() {
     cd /tmp
     rm -rf /tmp/naiveproxy-* /tmp/naiveproxy-latest.tar.xz
 
-    # Запрашиваем JSON, разбиваем по объектам assets (tr ',' '\n'), находим нужную строку и точно вырезаем URL через sed
-    URL=$(curl -sSL -H "User-Agent: Mozilla/5.0" https://api.github.com/repos/klzgrad/naiveproxy/releases/latest | tr ',' '\n' | grep "browser_download_url" | grep "openwrt-aarch64" | grep "\.tar\.xz" | grep -v "static" | head -n 1 | sed -n 's/.*"browser_download_url": *"\([^"]*\)".*/\1/p')
+    echo -e "      Определение версии последнего релиза..."
+    # Запрашиваем редирект GitHub и извлекаем наименование последнего тега (например, v150.0.7871.63-1)
+    TAG=$(curl -sSI -H "User-Agent: Mozilla/5.0" https://github.com/klzgrad/naiveproxy/releases/latest | grep -i "^location:" | sed 's/.*tag\///' | tr -d '\r\n')
 
-    if [ -z "$URL" ]; then
-        echo -e "      ${RED}ОШИБКА: Не удалось распарсить прямую ссылку на архив c GitHub API!${NC}"
-        echo -e "      Проверьте интернет или закомментируйте проверку для отладки."
+    if [ -z "$TAG" ]; then
+        echo -e "      ${RED}ОШИБКА: Не удалось определить номер версии с GitHub!${NC}"
+        echo -e "      Проверьте интернет-соединение или время на роутере (команда 'date')."
         exit 1
     fi
 
-    echo -e "      Прямая ссылка получена:"
-    echo -e "      ${CYAN}$URL${NC}"
-    echo -e "      Скачивание архива..."
+    echo -e "      Актуальная версия: ${CYAN}${TAG}${NC}"
+
+    # Формируем прямое имя архива
+    ARCHIVE_NAME="naiveproxy-${TAG}-openwrt-aarch64_cortex-a53.tar.xz"
+    URL="https://github.com/klzgrad/naiveproxy/releases/download/${TAG}/${ARCHIVE_NAME}"
+
+    echo -e "      Скачивание архива: ${CYAN}${ARCHIVE_NAME}${NC}"
     curl -sSL -H "User-Agent: Mozilla/5.0" -o naiveproxy-latest.tar.xz "$URL"
 
-    # Проверка сигнатуры xz перед распаковкой
+    # Проверяем целостность файла
     if ! xz -t naiveproxy-latest.tar.xz >/dev/null 2>&1; then
-        echo -e "      ${RED}ОШИБКА: Скачанный файл поврежден или не является .tar.xz архивом!${NC}"
-        rm -f naiveproxy-latest.tar.xz
-        exit 1
+        # Если сборка cortex-a53 по какой-то причине отсутствует, пробуем универсальный generic-архив
+        echo -e "      ${YELLOW}Пробуем альтернативную универсальную сборку (generic)...${NC}"
+        URL_GENERIC="https://github.com/klzgrad/naiveproxy/releases/download/${TAG}/naiveproxy-${TAG}-openwrt-aarch64_generic.tar.xz"
+        curl -sSL -H "User-Agent: Mozilla/5.0" -o naiveproxy-latest.tar.xz "$URL_GENERIC"
+        
+        if ! xz -t naiveproxy-latest.tar.xz >/dev/null 2>&1; then
+            echo -e "      ${RED}ОШИБКА: Не удалось скачать валидный архив!${NC}"
+            rm -f naiveproxy-latest.tar.xz
+            exit 1
+        fi
     fi
 
-    echo -e "      Распаковка архива..."
+    echo -e "      Распаковка и замена бинарника..."
     tar -xf naiveproxy-latest.tar.xz
     
-    # Динамический поиск бинарника
     NAIVE_BIN=$(find /tmp -type f -name "naive" | head -n 1)
 
     if [ -n "$NAIVE_BIN" ] && [ -f "$NAIVE_BIN" ]; then
