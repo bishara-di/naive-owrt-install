@@ -53,12 +53,12 @@ download_latest_naive() {
     cd /tmp
     rm -rf /tmp/naiveproxy-* /tmp/naiveproxy-latest.tar.xz
 
-    # Запрашиваем API, разбиваем сплошной JSON на строки (tr '}' '\n') и забираем строго URL архива
-    URL=$(curl -sSL -H "User-Agent: Mozilla/5.0" https://api.github.com/repos/klzgrad/naiveproxy/releases/latest | tr '}' '\n' | grep "browser_download_url" | grep "openwrt-aarch64" | grep "\.tar\.xz" | head -n 1 | awk -F '"' '{print $4}')
+    # Запрашиваем JSON, разбиваем по объектам assets (tr ',' '\n'), находим нужную строку и точно вырезаем URL через sed
+    URL=$(curl -sSL -H "User-Agent: Mozilla/5.0" https://api.github.com/repos/klzgrad/naiveproxy/releases/latest | tr ',' '\n' | grep "browser_download_url" | grep "openwrt-aarch64" | grep "\.tar\.xz" | grep -v "static" | head -n 1 | sed -n 's/.*"browser_download_url": *"\([^"]*\)".*/\1/p')
 
     if [ -z "$URL" ]; then
-        echo -e "      ${RED}ОШИБКА: Не удалось получить прямую ссылку на архив c GitHub API!${NC}"
-        echo -e "      Проверьте доступность интернета или точное время на роутере (команда 'date')."
+        echo -e "      ${RED}ОШИБКА: Не удалось распарсить прямую ссылку на архив c GitHub API!${NC}"
+        echo -e "      Проверьте интернет или закомментируйте проверку для отладки."
         exit 1
     fi
 
@@ -91,7 +91,6 @@ download_latest_naive() {
         exit 1
     fi
 }
-
 # ------------------------------------------------------------------------------
 # 3. Настройка конфигурации и службы procd
 # ------------------------------------------------------------------------------
