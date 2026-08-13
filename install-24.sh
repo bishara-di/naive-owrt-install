@@ -17,18 +17,18 @@ echo -e "${CYAN}========================================================${NC}"
 echo ""
 
 # ------------------------------------------------------------------------------
-# Шаг 1. Подготовка системы и проверка зависимостей
+# 1. Подготовка системы и проверка зависимостей
 # ------------------------------------------------------------------------------
 prepare_env() {
     echo -e "${YELLOW}[1/4] Проверка и подготовка окружения...${NC}"
     
-    # Синхронизация системного времени
+    # Синхронизация системного времени (критично для валидации TLS GitHub)
     if [ -x /usr/sbin/ntpd ]; then
         echo -e "      Синхронизация системного времени..."
         ntpd -q -p time.google.com >/dev/null 2>&1 || true
     fi
 
-    # Проверка зависимостей
+    # Проверка наличия пакетов
     NEED_UPDATE=0
     for pkg in curl tar xz ca-bundle ca-certificates; do
         if ! opkg list-installed | grep -q "^$pkg "; then
@@ -38,7 +38,7 @@ prepare_env() {
     done
 
     if [ "$NEED_UPDATE" -eq 1 ]; then
-        echo -e "      Установка системных утилит (curl, tar, xz, ca-certificates)..."
+        echo -e "      Установка недостающих системных утилит (curl, tar, xz, ca-certificates)..."
         rm -f /var/opkg-lists/* >/dev/null 2>&1
         opkg update >/dev/null 2>&1
         opkg install curl tar xz ca-bundle ca-certificates >/dev/null 2>&1
@@ -46,52 +46,54 @@ prepare_env() {
 }
 
 # ------------------------------------------------------------------------------
-# Шаг 2. Загрузка последнего релиза с GitHub
+# 2. Загрузка последнего релиза с GitHub
 # ------------------------------------------------------------------------------
 download_latest_naive() {
     echo -e "${YELLOW}[2/4] Загрузка актуального релиза NaïveProxy с GitHub...${NC}"
     cd /tmp
     rm -rf /tmp/naiveproxy-* /tmp/naiveproxy-latest.tar.xz
 
-    # Точный фильтр ссылки на .tar.xz
-    URL=$(curl -sSL -H "User-Agent: Mozilla/5.0" https://api.github.com/repos/klzgrad/naiveproxy/releases/latest | grep "browser_download_url" | grep "openwrt-aarch64" | grep "\.tar\.xz" | head -n 1 | cut -d '"' -f 4)
+    # Запрашиваем API, разбиваем сплошной JSON на строки (tr '}' '\n') и забираем строго URL архива
+    URL=$(curl -sSL -H "User-Agent: Mozilla/5.0" https://api.github.com/repos/klzgrad/naiveproxy/releases/latest | tr '}' '\n' | grep "browser_download_url" | grep "openwrt-aarch64" | grep "\.tar\.xz" | head -n 1 | awk -F '"' '{print $4}')
 
     if [ -z "$URL" ]; then
-        echo -e "      ${RED}ОШИБКА: Не удалось получить прямую ссылку на архив c GitHub!${NC}"
+        echo -e "      ${RED}ОШИБКА: Не удалось получить прямую ссылку на архив c GitHub API!${NC}"
         echo -e "      Проверьте доступность интернета или точное время на роутере (команда 'date')."
         exit 1
     fi
 
-    echo -e "      Прямая ссылка получена: ${CYAN}$(basename "$URL")${NC}"
+    echo -e "      Прямая ссылка получена:"
+    echo -e "      ${CYAN}$URL${NC}"
     echo -e "      Скачивание архива..."
     curl -sSL -H "User-Agent: Mozilla/5.0" -o naiveproxy-latest.tar.xz "$URL"
 
-    # Валидация xz архива перед распаковкой
+    # Проверка сигнатуры xz перед распаковкой
     if ! xz -t naiveproxy-latest.tar.xz >/dev/null 2>&1; then
-        echo -e "      ${RED}ОШИБКА: Скачанный файл не является архивом .tar.xz!${NC}"
+        echo -e "      ${RED}ОШИБКА: Скачанный файл поврежден или не является .tar.xz архивом!${NC}"
         rm -f naiveproxy-latest.tar.xz
         exit 1
     fi
 
-    echo -e "      Распаковка и замена бинарника..."
+    echo -e "      Распаковка архива..."
     tar -xf naiveproxy-latest.tar.xz
     
+    # Динамический поиск бинарника
     NAIVE_BIN=$(find /tmp -type f -name "naive" | head -n 1)
 
-    if [ -f "$NAIVE_BIN" ]; then
+    if [ -n "$NAIVE_BIN" ] && [ -f "$NAIVE_BIN" ]; then
         mv "$NAIVE_BIN" /usr/bin/naive
         chmod +x /usr/bin/naive
         rm -rf /tmp/naiveproxy-* /tmp/naiveproxy-latest.tar.xz
-        echo -e "      ${GREEN}Исполняемый файл /usr/bin/naive успешно обновлен!${NC}"
+        echo -e "      ${GREEN}Исполняемый файл /usr/bin/naive успешно установлен!${NC}"
     else
-        echo -e "      ${RED}ОШИБКА: Бинарник 'naive' не найден внутри архива!${NC}"
+        echo -e "      ${RED}ОШИБКА: Исполняемый файл 'naive' не найден внутри архива!${NC}"
         rm -rf /tmp/naiveproxy-* /tmp/naiveproxy-latest.tar.xz
         exit 1
     fi
 }
 
 # ------------------------------------------------------------------------------
-# Шаг 3. Создание/настройка конфигурации и службы procd
+# 3. Настройка конфигурации и службы procd
 # ------------------------------------------------------------------------------
 setup_config_and_service() {
     echo -e "${YELLOW}[3/4] Настройка конфигурации и службы автозапуска...${NC}"
@@ -141,6 +143,7 @@ setup_config_and_service() {
             ;;
     esac
 
+    # Генерация JSON
     cat << EOF > /etc/naiveproxy/config.json
 {
   "listen": "socks://127.0.0.1:${LOCAL_PORT}",
@@ -149,8 +152,9 @@ setup_config_and_service() {
   "concurrency": ${CONCURRENCY_VAL}
 }
 EOF
-    echo -e "      Файл /etc/naiveproxy/config.json успешно создан."
+    echo -e "      Конфигурация /etc/naiveproxy/config.json создана."
 
+    # Генерация init-скрипта procd
     cat << 'EOF' > /etc/init.d/naiveproxy
 #!/bin/sh /etc/rc.common
 START=99
@@ -171,7 +175,7 @@ EOF
 }
 
 # ------------------------------------------------------------------------------
-# Шаг 4. Диагностика и проверка статуса
+# 4. Диагностика и проверка статуса
 # ------------------------------------------------------------------------------
 check_status() {
     echo -e "${YELLOW}[4/4] Запуск и проверка статуса службы...${NC}"
@@ -231,4 +235,4 @@ case "$ACTION" in
 esac
 
 echo ""
-echo -e "${GREEN}Успешно завершено!${NC}"
+echo -e "${GREEN}Операция успешно завершена!${NC}"
