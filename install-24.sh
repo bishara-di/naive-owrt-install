@@ -22,15 +22,15 @@ echo ""
 prepare_env() {
     echo -e "${YELLOW}[1/4] Проверка и подготовка окружения...${NC}"
     
-    # Синхронизация системного времени
+    # Синхронизация системного времени (критично для проверки TLS-сертификатов)
     if [ -x /usr/sbin/ntpd ]; then
         echo -e "      Синхронизация системного времени..."
         ntpd -q -p time.google.com >/dev/null 2>&1 || true
     fi
 
-    # Установка базовых утилит, если их нет
+    # Проверяем и устанавливаем необходимые пакеты
     NEED_UPDATE=0
-    for pkg in tar xz wget-ssl ca-bundle ca-certificates; do
+    for pkg in curl tar xz ca-bundle ca-certificates; do
         if ! opkg list-installed | grep -q "^$pkg "; then
             NEED_UPDATE=1
             break
@@ -38,10 +38,10 @@ prepare_env() {
     done
 
     if [ "$NEED_UPDATE" -eq 1 ]; then
-        echo -e "      Установка системных утилит (wget-ssl, tar, xz, ca-certificates)..."
+        echo -e "      Установка системных утилит (curl, tar, xz, ca-certificates)..."
         rm -f /var/opkg-lists/* >/dev/null 2>&1
         opkg update >/dev/null 2>&1
-        opkg install tar xz wget-ssl ca-bundle ca-certificates >/dev/null 2>&1
+        opkg install curl tar xz ca-bundle ca-certificates >/dev/null 2>&1
     fi
 }
 
@@ -51,22 +51,23 @@ prepare_env() {
 download_latest_naive() {
     echo -e "${YELLOW}[2/4] Загрузка актуального релиза NaïveProxy с GitHub...${NC}"
     cd /tmp
-    rm -rf naiveproxy-* naiveproxy-latest.tar.xz
+    rm -rf /tmp/naiveproxy-* /tmp/naiveproxy-latest.tar.xz
 
-    # Парсинг ссылки на актуальный релиз
-    URL=$(wget -qO- --user-agent="Mozilla/5.0" https://api.github.com/repos/klzgrad/naiveproxy/releases/latest | grep "browser_download_url" | grep "openwrt-aarch64" | cut -d '"' -f 4)
+    # Получение прямой ссылки на релиз с использованием User-Agent
+    URL=$(curl -sSL -H "User-Agent: Mozilla/5.0" https://api.github.com/repos/klzgrad/naiveproxy/releases/latest | grep "browser_download_url" | grep "openwrt-aarch64" | head -n 1 | cut -d '"' -f 4)
 
     if [ -z "$URL" ]; then
-        echo -e "      ${RED}ОШИБКА: Не удалось получить ссылку на релиз с GitHub!${NC}"
-        echo -e "      Проверьте интернет-соединение или время на роутере (команда 'date')."
+        echo -e "      ${RED}ОШИБКА: Не удалось получить ссылку на релиз с GitHub API!${NC}"
+        echo -e "      Проверьте интернет-соединение или точное время на роутере (команда 'date')."
         exit 1
     fi
 
-    echo -e "      Ссылка получена, скачивание архива..."
-    wget -q --user-agent="Mozilla/5.0" --no-check-certificate -O naiveproxy-latest.tar.xz "$URL"
+    echo -e "      Ссылка получена, скачивание архива через curl..."
+    curl -sSL -H "User-Agent: Mozilla/5.0" -o naiveproxy-latest.tar.xz "$URL"
 
-    if [ ! -s naiveproxy-latest.tar.xz ]; then
-        echo -e "      ${RED}ОШИБКА: Файл архива не скачался или пуст!${NC}"
+    # Проверяем, что архив валиден и не поврежден
+    if ! xz -t naiveproxy-latest.tar.xz >/dev/null 2>&1; then
+        echo -e "      ${RED}ОШИБКА: Скачанный файл повреждён или не является xz-архивом!${NC}"
         rm -f naiveproxy-latest.tar.xz
         exit 1
     fi
@@ -74,14 +75,17 @@ download_latest_naive() {
     echo -e "      Распаковка и замена бинарника..."
     tar -xf naiveproxy-latest.tar.xz
     
-    if [ -f naiveproxy-*/naive ]; then
-        mv naiveproxy-*/naive /usr/bin/naive
+    # Динамический поиск бинарника
+    NAIVE_BIN=$(find /tmp -type f -name "naive" | head -n 1)
+
+    if [ -f "$NAIVE_BIN" ]; then
+        mv "$NAIVE_BIN" /usr/bin/naive
         chmod +x /usr/bin/naive
-        rm -rf naiveproxy-* naiveproxy-latest.tar.xz
+        rm -rf /tmp/naiveproxy-* /tmp/naiveproxy-latest.tar.xz
         echo -e "      ${GREEN}Исполняемый файл /usr/bin/naive успешно обновлен!${NC}"
     else
         echo -e "      ${RED}ОШИБКА: Исполняемый файл 'naive' не найден внутри архива!${NC}"
-        rm -rf naiveproxy-* naiveproxy-latest.tar.xz
+        rm -rf /tmp/naiveproxy-* /tmp/naiveproxy-latest.tar.xz
         exit 1
     fi
 }
@@ -201,7 +205,7 @@ check_status() {
 }
 
 # ------------------------------------------------------------------------------
-# Главное меню выбора действия
+# Главное меню
 # ------------------------------------------------------------------------------
 echo "Выберите действие:"
 echo "1) Чистая установка (Загрузка бинарника + ввод данных + создание конфигов)"
@@ -227,4 +231,4 @@ case "$ACTION" in
 esac
 
 echo ""
-echo -e "${GREEN}Завершено!${NC}"
+echo -e "${GREEN}Успешно завершено!${NC}"
