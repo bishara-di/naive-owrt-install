@@ -1,7 +1,8 @@
 #!/bin/sh
 
 # ==============================================================================
-# NaïveProxy Installer & Updater for OpenWrt (aarch64)
+# NaïveProxy Universal Installer/Updater for OpenWrt (aarch64)
+# Поддерживает OpenWrt 19..24 (opkg) И OpenWrt 25+ (apk)
 # ==============================================================================
 
 GREEN='\033[0;32m'
@@ -12,41 +13,51 @@ NC='\033[0m'
 
 clear
 echo -e "${CYAN}========================================================${NC}"
-echo -e "${CYAN}   NaïveProxy Installer & Updater for OpenWrt (aarch64) ${NC}"
+echo -e "${CYAN}  NaïveProxy Universal Installer/Updater (OpenWrt aarch64)${NC}"
 echo -e "${CYAN}========================================================${NC}"
 echo ""
 
 # ------------------------------------------------------------------------------
-# 1. Подготовка системы и проверка зависимостей
+# 1. Подготовка системы и универсальная установка пакетов (opkg / apk)
 # ------------------------------------------------------------------------------
 prepare_env() {
-    echo -e "${YELLOW}[1/4] Проверка и подготовка окружения...${NC}"
+    echo -e "${YELLOW}[1/4] Проверка окружения и пакетного менеджера...${NC}"
     
-    # Синхронизация системного времени (критично для валидации TLS GitHub)
+    # Синхронизация системного времени
     if [ -x /usr/sbin/ntpd ]; then
         echo -e "      Синхронизация системного времени..."
         ntpd -q -p time.google.com >/dev/null 2>&1 || true
     fi
 
-    # Проверка наличия пакетов
-    NEED_UPDATE=0
-    for pkg in curl tar xz ca-bundle ca-certificates; do
-        if ! opkg list-installed | grep -q "^$pkg "; then
-            NEED_UPDATE=1
-            break
-        fi
-    done
+    # Детект пакетного менеджера: apk (OpenWrt 25+) или opkg (OpenWrt <= 24)
+    if command -v apk >/dev/null 2>&1; then
+        echo -e "      Обнаружен новый пакетный менеджер ${CYAN}apk${NC} (OpenWrt 25+)"
+        echo -e "      Обновление индексов и установка утилит..."
+        apk update >/dev/null 2>&1
+        apk add --no-cache curl tar xz ca-certificates >/dev/null 2>&1
+    elif command -v opkg >/dev/null 2>&1; then
+        echo -e "      Обнаружен классический пакетный менеджер ${CYAN}opkg${NC} (OpenWrt <= 24)"
+        NEED_UPDATE=0
+        for pkg in curl tar xz ca-bundle ca-certificates; do
+            if ! opkg list-installed 2>/dev/null | grep -q "^$pkg "; then
+                NEED_UPDATE=1
+                break
+            fi
+        done
 
-    if [ "$NEED_UPDATE" -eq 1 ]; then
-        echo -e "      Установка недостающих системных утилит (curl, tar, xz, ca-certificates)..."
-        rm -f /var/opkg-lists/* >/dev/null 2>&1
-        opkg update >/dev/null 2>&1
-        opkg install curl tar xz ca-bundle ca-certificates >/dev/null 2>&1
+        if [ "$NEED_UPDATE" -eq 1 ]; then
+            echo -e "      Обновление индексов и установка утилит..."
+            rm -f /var/opkg-lists/* >/dev/null 2>&1
+            opkg update >/dev/null 2>&1
+            opkg install curl tar xz ca-bundle ca-certificates >/dev/null 2>&1
+        fi
+    else
+        echo -e "      ${YELLOW}Внимание: Не найдены ни opkg, ни apk. Пропускаем установку зависимостей...${NC}"
     fi
 }
 
 # ------------------------------------------------------------------------------
-# 2. Загрузка последнего релиза с GitHub
+# 2. Загрузка последнего релиза с GitHub (Статический бинарник)
 # ------------------------------------------------------------------------------
 download_latest_naive() {
     echo -e "${YELLOW}[2/4] Загрузка актуального релиза NaïveProxy с GitHub...${NC}"
@@ -54,39 +65,40 @@ download_latest_naive() {
     rm -rf /tmp/naiveproxy-* /tmp/naiveproxy-latest.tar.xz
 
     echo -e "      Определение версии последнего релиза..."
-    # Запрашиваем редирект GitHub и извлекаем наименование последнего тега (например, v150.0.7871.63-1)
     TAG=$(curl -sSI -H "User-Agent: Mozilla/5.0" https://github.com/klzgrad/naiveproxy/releases/latest | grep -i "^location:" | sed 's/.*tag\///' | tr -d '\r\n')
 
     if [ -z "$TAG" ]; then
         echo -e "      ${RED}ОШИБКА: Не удалось определить номер версии с GitHub!${NC}"
-        echo -e "      Проверьте интернет-соединение или время на роутере (команда 'date')."
+        echo -e "      Проверьте интернет-соединение или системное время (команда 'date')."
         exit 1
     fi
 
     echo -e "      Актуальная версия: ${CYAN}${TAG}${NC}"
 
-    # Формируем прямое имя архива
-    ARCHIVE_NAME="naiveproxy-${TAG}-openwrt-aarch64_cortex-a53.tar.xz"
-    URL="https://github.com/klzgrad/naiveproxy/releases/download/${TAG}/${ARCHIVE_NAME}"
+    # Цепочка фолбэков (начинаем со статического generic, работающего на любых релизах)
+    SUCCESS_DOWNLOAD=0
+    for TARGET_ARCH in "aarch64_generic-static" "aarch64_cortex-a53-static" "aarch64_cortex-a53" "aarch64_generic"; do
+        ARCHIVE_NAME="naiveproxy-${TAG}-openwrt-${TARGET_ARCH}.tar.xz"
+        URL="https://github.com/klzgrad/naiveproxy/releases/download/${TAG}/${ARCHIVE_NAME}"
 
-    echo -e "      Скачивание архива: ${CYAN}${ARCHIVE_NAME}${NC}"
-    curl -sSL -H "User-Agent: Mozilla/5.0" -o naiveproxy-latest.tar.xz "$URL"
+        echo -e "      Пробуем сборку: ${CYAN}${TARGET_ARCH}${NC}..."
+        curl -sSL -H "User-Agent: Mozilla/5.0" -o naiveproxy-latest.tar.xz "$URL"
 
-    # Проверяем целостность файла
-    if ! xz -t naiveproxy-latest.tar.xz >/dev/null 2>&1; then
-        # Если сборка cortex-a53 по какой-то причине отсутствует, пробуем универсальный generic-архив
-        echo -e "      ${YELLOW}Пробуем альтернативную универсальную сборку (generic)...${NC}"
-        URL_GENERIC="https://github.com/klzgrad/naiveproxy/releases/download/${TAG}/naiveproxy-${TAG}-openwrt-aarch64_generic.tar.xz"
-        curl -sSL -H "User-Agent: Mozilla/5.0" -o naiveproxy-latest.tar.xz "$URL_GENERIC"
-        
-        if ! xz -t naiveproxy-latest.tar.xz >/dev/null 2>&1; then
-            echo -e "      ${RED}ОШИБКА: Не удалось скачать валидный архив!${NC}"
+        if xz -t naiveproxy-latest.tar.xz >/dev/null 2>&1; then
+            echo -e "      ${GREEN}Успешно скачан валидный архив: ${ARCHIVE_NAME}${NC}"
+            SUCCESS_DOWNLOAD=1
+            break
+        else
             rm -f naiveproxy-latest.tar.xz
-            exit 1
         fi
+    done
+
+    if [ "$SUCCESS_DOWNLOAD" -eq 0 ]; then
+        echo -e "      ${RED}ОШИБКА: Не удалось скачать ни один валидный архив под aarch64!${NC}"
+        exit 1
     fi
 
-    echo -e "      Распаковка и замена бинарника..."
+    echo -e "      Распаковка и установка бинарника..."
     tar -xf naiveproxy-latest.tar.xz
     
     NAIVE_BIN=$(find /tmp -type f -name "naive" | head -n 1)
@@ -95,13 +107,21 @@ download_latest_naive() {
         mv "$NAIVE_BIN" /usr/bin/naive
         chmod +x /usr/bin/naive
         rm -rf /tmp/naiveproxy-* /tmp/naiveproxy-latest.tar.xz
-        echo -e "      ${GREEN}Исполняемый файл /usr/bin/naive успешно установлен!${NC}"
+        
+        # Валидация запускаемости
+        if /usr/bin/naive --version >/dev/null 2>&1; then
+            echo -e "      ${GREEN}Исполняемый файл /usr/bin/naive успешно проверен и готов к работе!${NC}"
+        else
+            echo -e "      ${RED}ОШИБКА: Скачанный бинарник не запускается в вашей ОС!${NC}"
+            exit 1
+        fi
     else
-        echo -e "      ${RED}ОШИБКА: Исполняемый файл 'naive' не найден внутри архива!${NC}"
+        echo -e "      ${RED}ОШИБКА: Файл 'naive' не найден внутри архива!${NC}"
         rm -rf /tmp/naiveproxy-* /tmp/naiveproxy-latest.tar.xz
         exit 1
     fi
 }
+
 # ------------------------------------------------------------------------------
 # 3. Настройка конфигурации и службы procd
 # ------------------------------------------------------------------------------
@@ -112,7 +132,7 @@ setup_config_and_service() {
     echo ""
     echo -e "${CYAN}--- Введите данные вашего сервера NaïveProxy ---${NC}"
     
-    read -p "Адрес сервера (домен или IP) [например: srv-repo.jo3.org]: " NAV_HOST
+    read -p "Адрес сервера (домен или IP): " NAV_HOST
     while [ -z "$NAV_HOST" ]; do
         echo -e "${RED}Адрес сервера не может быть пустым!${NC}"
         read -p "Адрес сервера: " NAV_HOST
@@ -153,7 +173,6 @@ setup_config_and_service() {
             ;;
     esac
 
-    # Генерация JSON
     cat << EOF > /etc/naiveproxy/config.json
 {
   "listen": "socks://127.0.0.1:${LOCAL_PORT}",
@@ -164,7 +183,6 @@ setup_config_and_service() {
 EOF
     echo -e "      Конфигурация /etc/naiveproxy/config.json создана."
 
-    # Генерация init-скрипта procd
     cat << 'EOF' > /etc/init.d/naiveproxy
 #!/bin/sh /etc/rc.common
 START=99
@@ -210,6 +228,12 @@ check_status() {
     LISTEN_PORT=${LISTEN_PORT:-10800}
 
     PORT_CHECK=$(netstat -tulpn 2>/dev/null | grep "$LISTEN_PORT" || ss -tulpn 2>/dev/null | grep "$LISTEN_PORT")
+    
+    if [ -z "$PORT_CHECK" ] && [ -f /proc/net/tcp ]; then
+        HEX_PORT=$(printf '%04X' "$LISTEN_PORT")
+        PORT_CHECK=$(grep -i ":$HEX_PORT " /proc/net/tcp)
+    fi
+
     if [ -n "$PORT_CHECK" ]; then
         echo -e "2. Локальный SOCKS5 порт ${LISTEN_PORT}: ${GREEN}ПОДНЯТ И СЛУШАЕТ ВХОДЯЩИЕ ПОДКЛЮЧЕНИЯ${NC}"
     else
